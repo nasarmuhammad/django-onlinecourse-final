@@ -1,12 +1,15 @@
 from django.shortcuts import render
 from django.http import HttpResponseRedirect
 # <HINT> Import any new Models here
-from .models import Course, Enrollment
+from .models import Course, Enrollment, Question, Choice, Submission
 from django.contrib.auth.models import User
 from django.shortcuts import get_object_or_404, render, redirect
 from django.urls import reverse
 from django.views import generic
 from django.contrib.auth import login, logout, authenticate
+from django.contrib.auth.decorators import login_required
+from django.views.decorators.http import require_POST
+from django.http import HttpResponseBadRequest
 import logging
 # Get an instance of a logger
 logger = logging.getLogger(__name__)
@@ -86,7 +89,14 @@ class CourseListView(generic.ListView):
 
 class CourseDetailView(generic.DetailView):
     model = Course
-    template_name = 'onlinecourse/course_detail_bootstrap.html'
+    template_name = 'onlinecourse/course_details_bootstrap.html'
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context['is_enrolled'] = check_if_enrolled(
+            self.request.user, self.object
+        )
+        return context
 
 
 def enroll(request, course_id):
@@ -134,3 +144,143 @@ def enroll(request, course_id):
 
 
 
+
+
+
+# Task 5: Collect selected exam choices
+def extract_answers(request):
+    selected_ids = []
+
+    for key, value in request.POST.items():
+        if key.startswith("choice_"):
+            try:
+                choice_id = int(value)
+            except (TypeError, ValueError):
+                return None
+
+            if key != f"choice_{choice_id}":
+                return None
+
+            selected_ids.append(choice_id)
+
+    return selected_ids
+
+
+# Task 5: Submit exam answers
+@login_required(login_url='onlinecourse:login')
+@require_POST
+def submit(request, course_id):
+    course = get_object_or_404(Course, pk=course_id)
+
+    enrollment = get_object_or_404(
+        Enrollment,
+        user=request.user,
+        course=course
+    )
+
+    selected_ids = extract_answers(request)
+
+    if selected_ids is None:
+        return HttpResponseBadRequest("Invalid exam answer")
+
+    valid_choices = Choice.objects.filter(
+        question__lesson__course=course,
+        id__in=selected_ids
+    )
+
+    valid_ids = set(
+        valid_choices.values_list('id', flat=True)
+    )
+
+    if valid_ids != set(selected_ids):
+        return HttpResponseBadRequest(
+            "One or more choices do not belong to this course"
+        )
+
+    submission = Submission.objects.create(
+        enrollment=enrollment
+    )
+
+    submission.choices.set(valid_ids)
+
+    return redirect(
+        'onlinecourse:show_exam_result',
+        course_id=course.id,
+        submission_id=submission.id
+    )
+
+
+# Task 5: Calculate and display exam results
+@login_required(login_url='onlinecourse:login')
+def show_exam_result(request, course_id, submission_id):
+    course = get_object_or_404(Course, pk=course_id)
+
+    submission = get_object_or_404(
+        Submission,
+        pk=submission_id,
+        enrollment__course=course,
+        enrollment__user=request.user
+    )
+
+    selected_ids = set(
+        submission.choices.values_list('id', flat=True)
+    )
+
+    questions = Question.objects.filter(
+        lesson__course=course
+    ).select_related('lesson').prefetch_related(
+        'choice_set'
+    ).order_by('lesson__order', 'id')
+
+    score = 0
+    total = 0
+    results = []
+
+    for question in questions:
+        choices = list(question.choice_set.all())
+        question_choice_ids = {c.id for c in choices}
+
+        selected_for_question = (
+            selected_ids & question_choice_ids
+        )
+
+        correct_ids = {
+            c.id for c in choices if c.is_correct
+        }
+
+        is_correct = question.is_get_score(
+            selected_for_question
+        )
+
+        points = max(question.grade, 0)
+        total += points
+
+        if is_correct:
+            score += points
+
+        results.append({
+            'question': question,
+            'choices': choices,
+            'selected_ids': selected_for_question,
+            'correct_ids': correct_ids,
+            'is_correct': is_correct,
+            'points': points,
+        })
+
+    grade = round(score / total * 100, 2) if total else 0
+
+    context = {
+        'course': course,
+        'submission': submission,
+        'grade': grade,
+        'score': score,
+        'total': total,
+        'results': results,
+        'passed': grade > 80,
+    }
+
+    return render(
+        request,
+        'onlinecourse/exam_result_bootstrap.html',
+        context
+    )

@@ -284,3 +284,11 @@ fabric.properties
 .DS_Store
 .DS_Store
 final_template.zip
+
+# Local Django runtime and backups
+db.sqlite3
+db.sqlite3-journal
+*.backup
+*.before_exam
+*.py.backup
+*.py.before_exam
